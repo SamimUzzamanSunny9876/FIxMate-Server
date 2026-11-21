@@ -24,19 +24,27 @@ export async function connectToMongoDB() {
 
 const connectedClient = await connectToMongoDB()
 const database =  connectedClient.db('FixMatedb')
-const users = database.collection('user');
+const user = database.collection('user');
 const services = database.collection('services')
 const bookings = database.collection('bookings')
 const payments = database.collection('payments')
+// const users = database.collection('users');
+
 
 
 app.get('/', (req, res) =>{
     res.send('Server is servering')
 }) 
 
-app.get('/users', async (req, res)=> {
+app.get('/user', async (req, res)=> {
     const result = await users.find().toArray();
     res.send(result);
+})
+
+app.post('/services', async(req, res) =>{
+    const service = req.body
+    const result = services.insertOne(service);
+    res.send(result)
 })
 
 app.listen(port, () => {
