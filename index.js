@@ -83,6 +83,16 @@ app.get("/browse-services", async (req, res) => {
   const result = await services.find(query).sort(sortOption).toArray();
   res.send(result);
 });
+
+//Service details api 
+
+app.get('/browse-services/:id', async(req,res)=>{
+  const {id} = req.params
+  const result = await services.findOne({ _id: new ObjectId(id) })
+  res.send(result)
+
+})
+
 //technician services apis
 
 app.post('/services', async(req, res) =>{
