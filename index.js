@@ -162,6 +162,34 @@ app.patch("/bookings/:id", async (req, res) => {
 });
 
 
+//update profile api 
+// Get single user profile by email
+app.get("/user/:email", async (req, res) => {
+  const email = req.params.email;
+  const result = await users.findOne({ email });
+  res.send(result);
+});
+
+// Update user profile by email
+app.patch("/user/:email", async (req, res) => {
+  const email = req.params.email;
+  const { name, image, phone, area, bio } = req.body;
+
+  const updatedDoc = {
+    $set: {
+      name,
+      image,
+      phone,
+      area,
+      bio,
+    },
+  };
+
+
+  const result = await users.updateOne({ email }, updatedDoc);
+  res.send(result);
+});
+
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
 });
