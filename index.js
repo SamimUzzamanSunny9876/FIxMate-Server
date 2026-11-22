@@ -49,6 +49,39 @@ app.get('/users', async (req, res)=> {
     res.send(result);
 })
 
+//browse services api 
+app.get("/browse-services", async (req, res) => {
+  const query = {
+    approvalStatus: "approved",
+    isAvailable: true,
+  };
+
+  if (req.query.category && req.query.category !== "all") {
+    query.category = req.query.category;
+  }
+  if (req.query.estimatedDuration) {
+    query.estimatedDuration = req.query.estimatedDuration;
+  }
+  if (req.query.serviceMode && req.query.serviceMode !== "all") {
+    query.serviceMode = req.query.serviceMode;
+  }
+  if (req.query.search) {
+    query.$or = [
+      { title: { $regex: req.query.search, $options: "i" } },
+      { category: { $regex: req.query.search, $options: "i" } },
+      { serviceArea: { $regex: req.query.search, $options: "i" } },
+    ];
+  }
+
+  let sortOption = { createdAt: -1 };
+  if (req.query.sort === "price_asc") sortOption = { basePrice: 1 };
+  if (req.query.sort === "price_desc") sortOption = { basePrice: -1 };
+  if (req.query.sort === "newest") sortOption = { createdAt: -1 };
+
+  const result = await services.find(query).sort(sortOption).toArray();
+  res.send(result);
+});
+
 //technician services apis
 
 app.post('/services', async(req, res) =>{
