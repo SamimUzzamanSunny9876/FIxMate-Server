@@ -50,38 +50,39 @@ app.get('/users', async (req, res)=> {
 })
 
 //browse services api 
+// Public Browse Services (Search, Filter & Sort)
 app.get("/browse-services", async (req, res) => {
+  const { search, category, serviceMode, sort } = req.query;
+
   const query = {
     approvalStatus: "approved",
     isAvailable: true,
   };
 
-  if (req.query.category && req.query.category !== "all") {
-    query.category = req.query.category;
+  if (category && category !== "all") {
+    query.category = category;
   }
-  if (req.query.estimatedDuration) {
-    query.estimatedDuration = req.query.estimatedDuration;
+
+  if (serviceMode && serviceMode !== "all") {
+    query.serviceMode = serviceMode;
   }
-  if (req.query.serviceMode && req.query.serviceMode !== "all") {
-    query.serviceMode = req.query.serviceMode;
-  }
-  if (req.query.search) {
+
+  if (search) {
     query.$or = [
-      { title: { $regex: req.query.search, $options: "i" } },
-      { category: { $regex: req.query.search, $options: "i" } },
-      { serviceArea: { $regex: req.query.search, $options: "i" } },
+      { title: { $regex: search, $options: "i" } },
+      { category: { $regex: search, $options: "i" } },
+      { serviceArea: { $regex: search, $options: "i" } },
     ];
   }
 
   let sortOption = { createdAt: -1 };
-  if (req.query.sort === "price_asc") sortOption = { basePrice: 1 };
-  if (req.query.sort === "price_desc") sortOption = { basePrice: -1 };
-  if (req.query.sort === "newest") sortOption = { createdAt: -1 };
+  if (sort === "price_asc") sortOption = { basePrice: 1 };
+  if (sort === "price_desc") sortOption = { basePrice: -1 };
+  if (sort === "newest") sortOption = { createdAt: -1 };
 
   const result = await services.find(query).sort(sortOption).toArray();
   res.send(result);
 });
-
 //technician services apis
 
 app.post('/services', async(req, res) =>{
