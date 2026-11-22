@@ -84,6 +84,15 @@ app.get("/browse-services", async (req, res) => {
   res.send(result);
 });
 
+// boooking post api 
+
+app.post('/bookings' , async(req, res ) =>{
+  const booking = req.body
+  const result = await bookings.insertOne(booking)
+
+  res.send(result)
+})
+
 //Service details api 
 
 app.get('/browse-services/:id', async(req,res)=>{
@@ -132,7 +141,25 @@ app.delete('/services/:id' , async (req,res)=> {
 } )
 
 
+// Get bookings (filtered by customerEmail or technicianEmail)
+app.get("/bookings", async (req, res) => {
+  const { customerEmail, technicianEmail } = req.query;
+  const query = {};
 
+  if (customerEmail) query.customerEmail = customerEmail;
+  if (technicianEmail) query.technicianEmail = technicianEmail;
+
+  const result = await bookings.find(query).sort({ createdAt: -1 }).toArray();
+  res.send(result);
+});
+
+// Update booking status (e.g. customer cancels a requested booking)
+app.patch("/bookings/:id", async (req, res) => {
+  const query = { _id: new ObjectId(req.params.id) };
+  const updatedDoc = { $set: req.body };
+  const result = await bookings.updateOne(query, updatedDoc);
+  res.send(result);
+});
 
 
 app.listen(port, () => {
