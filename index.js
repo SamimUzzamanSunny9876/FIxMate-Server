@@ -2,6 +2,9 @@ import express from 'express'
 import cors from 'cors'
 import 'dotenv/config'
 import { MongoClient, ObjectId } from 'mongodb';
+import Stripe from "stripe";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const client = new MongoClient(`mongodb://${process.env.DB_USER}:${process.env.DB_USER_PASSWORD}@ac-qptuiex-shard-00-00.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-01.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-02.xuksm8z.mongodb.net:27017/?ssl=true&replicaSet=atlas-psa02l-shard-0&authSource=admin`);
 const app = express()
@@ -188,6 +191,171 @@ app.patch("/user/:email", async (req, res) => {
 
   const result = await users.updateOne({ email }, updatedDoc);
   res.send(result);
+});
+
+// Payment relateve apis 
+// 1. Get payment history (supports customerEmail, technicianEmail, or all for admin)
+app.get("/payments", async (req, res) => {
+  try {
+    const { customerEmail, technicianEmail } = req.query;
+    const query = {};
+
+    if (customerEmail) query.customerEmail = customerEmail;
+    if (technicianEmail) query.technicianEmail = technicianEmail;
+
+    const result = await payments.find(query).sort({ paidAt: -1 }).toArray();
+    res.send(result);
+  } catch (err) {
+    res.status(500).send({ message: err.message || "Failed to fetch payments." });
+  }
+});
+
+// 2. Create Stripe Checkout Session for a completed & unpaid booking
+app.post("/create-checkout-session", async (req, res) => {
+  try {
+    const { bookingId } = req.body;
+    const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
+
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found." });
+    }
+    if (booking.status !== "completed") {
+      return res
+        .status(400)
+        .send({ message: "Payment is only allowed after repair completion." });
+    }
+    if (booking.paymentStatus === "paid") {
+      return res.status(400).send({ message: "This booking is already paid." });
+    }
+
+    const amount = Number(booking.finalAmount ?? booking.basePrice);
+    const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ["card"],
+      mode: "payment",
+      customer_email: booking.customerEmail,
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            product_data: {
+              name: booking.serviceTitle,
+              description: `Repair by ${booking.technicianName} (${booking.category})`,
+              images: booking.serviceImage ? [booking.serviceImage] : [],
+            },
+            unit_amount: Math.round(amount * 100), // Stripe uses cents
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        bookingId: booking._id.toString(),
+      },
+      success_url: `${clientUrl}/dashboard/customer/payments?success=true&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${clientUrl}/dashboard/customer/payments?canceled=true`,
+    });
+
+    res.send({ url: session.url });
+  } catch (err) {
+    console.error("Stripe checkout error:", err);
+    res
+      .status(500)
+      .send({ message: err.message || "Failed to create Stripe session." });
+  }
+});
+
+// 3. Verify Stripe Checkout Session, save Payment, and mark Booking as paid
+app.post("/payments/verify-session", async (req, res) => {
+  try {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+      return res.status(400).send({ message: "Session ID is required." });
+    }
+
+    // Prevent duplicate payment records on page refresh
+    const existingPayment = await payments.findOne({
+      stripeSessionId: sessionId,
+    });
+    if (existingPayment) {
+      return res.send(existingPayment);
+    }
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (session.payment_status !== "paid") {
+      return res.status(400).send({ message: "Payment has not been completed." });
+    }
+
+    const bookingId = session.metadata?.bookingId;
+    const booking = await bookings.findOne({ _id: new ObjectId(bookingId) });
+    if (!booking) {
+      return res.status(404).send({ message: "Associated booking not found." });
+    }
+
+    const paymentDoc = {
+      bookingId: booking._id.toString(),
+      serviceTitle: booking.serviceTitle,
+      customerName: booking.customerName,
+      customerEmail: booking.customerEmail,
+      technicianName: booking.technicianName,
+      technicianEmail: booking.technicianEmail,
+      amount: (session.amount_total || 0) / 100,
+      currency: "usd",
+      transactionId:
+        typeof session.payment_intent === "string"
+          ? session.payment_intent
+          : session.id,
+      stripeSessionId: session.id,
+      paymentStatus: "paid",
+      paidAt: new Date(),
+    };
+
+    const insertResult = await payments.insertOne(paymentDoc);
+
+    // Mark booking as paid and append to statusHistory
+    await bookings.updateOne(
+      { _id: new ObjectId(bookingId) },
+      {
+        $set: { paymentStatus: "paid" },
+        $push: {
+          statusHistory: { status: "paid", changedAt: new Date() },
+        },
+      }
+    );
+
+    res.send({ _id: insertResult.insertedId, ...paymentDoc });
+  } catch (err) {
+    console.error("Verify payment error:", err);
+    res
+      .status(500)
+      .send({ message: err.message || "Failed to verify Stripe payment." });
+  }
+});
+
+// status update api for booking 
+app.patch("/bookings/:id", async (req, res) => {
+  try {
+    const query = { _id: new ObjectId(req.params.id) };
+    const { status, finalAmount } = req.body;
+
+    const setFields = {};
+    if (status) setFields.status = status;
+    if (finalAmount !== undefined) setFields.finalAmount = Number(finalAmount);
+
+    const updateDoc = { $set: setFields };
+
+    if (status) {
+      updateDoc.$push = {
+        statusHistory: { status, changedAt: new Date() },
+      };
+    }
+
+    const result = await bookings.updateOne(query, updateDoc);
+    res.send(result);
+  } catch (err) {
+    console.error("PATCH /bookings/:id error:", err);
+    res.status(500).send({ message: err.message || "Failed to update booking." });
+  }
 });
 
 app.listen(port, () => {
