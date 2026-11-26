@@ -81,6 +81,20 @@ const verifyToken =  async(req, res, next) =>{
   next();
 }
 
+const verifyRole = (allowedRoles) => (req, res, next) => {
+  const role = req.user?.role || "customer";
+  if (!allowedRoles.includes(role)) {
+    return res
+      .status(403)
+      .send({ message: "Forbidden: Insufficient permissions." });
+  }
+  next();
+};
+
+const verifyCustomer = verifyRole(["customer"]);
+const verifyTechnician = verifyRole(["technician"]);
+const verifyAdmin = verifyRole(["admin"]);
+
 app.get("/users", async (req, res) => {
   const result = await users.find().toArray();
   res.send(result);
