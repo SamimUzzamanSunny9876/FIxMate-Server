@@ -39,13 +39,47 @@ const connectedClient = await connectToMongoDB();
 const database = connectedClient.db("FixMatedb");
 const users = database.collection("user");
 const services = database.collection("services");
+const sessions = database.collection("session");
 const bookings = database.collection("bookings");
 const payments = database.collection("payments");
-// const users = database.collection('users');
+
+
+
 
 app.get("/", (req, res) => {
   res.send("Server is servering");
 });
+
+const verifyToken =  async(req, res, next) =>{
+  const authHeader = req.headers.authorization;
+  if(!authHeader) {
+    res.status(401).send({ message : Unauthorized})
+
+  }
+  const token = authHeader.split(" ")[1];
+
+  if(!token){
+     res.status(401).send({message : "Unauthorized"})
+  }
+
+  const query = {token}
+   
+  const session = await sessions.findOne(query)
+  if(!session){
+     res.status(401).send({message : "Unauthorized"})
+  }
+  const userId = session.userId
+
+  const userQuery = {_id : new ObjectId(userId)}
+
+  const user = await users.findOne(userQuery)
+  if(!user){
+     res.status(401).send({message : Unauthorized})
+  }
+  req.user = user 
+
+  next();
+}
 
 app.get("/users", async (req, res) => {
   const result = await users.find().toArray();
@@ -112,7 +146,9 @@ app.post("/services", async (req, res) => {
   res.send(result);
 });
 
-app.get("/services", async (req, res) => {
+app.get("/services",verifyToken, async (req, res) => {
+
+  console.log(req.query);
   const { technicianEmail } = req.query;
   const query = technicianEmail
     ? { technicianEmail }
