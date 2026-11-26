@@ -154,7 +154,7 @@ app.get("/browse-services/:id", async (req, res) => {
 
 //technician services apis
 
-app.post("/services", async (req, res) => {
+app.post("/services",verifyToken, verifyTechnician,  async (req, res) => {
   const service = req.body;
   const result = await services.insertOne(service);
   res.send(result);
