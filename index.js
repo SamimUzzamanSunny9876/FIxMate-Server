@@ -91,6 +91,55 @@ const verifyCustomer = verifyRole(["customer"]);
 const verifyTechnician = verifyRole(["technician"]);
 const verifyAdmin = verifyRole(["admin"]);
 
+async function attachRatingsToServices(serviceDocs) {
+  if (!Array.isArray(serviceDocs) || serviceDocs.length === 0) {
+    return serviceDocs;
+  }
+
+  const stringIds = serviceDocs.map((s) => String(s._id));
+  const objectIds = stringIds
+    .filter((id) => ObjectId.isValid(id))
+    .map((id) => new ObjectId(id));
+
+  const ratingStats = await bookings
+    .aggregate([
+      {
+        $match: {
+          serviceId: { $in: [...stringIds, ...objectIds] },
+          paymentStatus: "paid",
+          rating: { $gte: 1, $lte: 5 },
+        },
+      },
+      {
+        $group: {
+          _id: { $toString: "$serviceId" },
+          avgRating: { $avg: "$rating" },
+          reviewCount: { $sum: 1 },
+        },
+      },
+    ])
+    .toArray();
+
+  const statsMap = new Map(
+    ratingStats.map((item) => [
+      String(item._id),
+      {
+        averageRating: Number(item.avgRating.toFixed(1)),
+        reviewCount: item.reviewCount,
+      },
+    ]),
+  );
+
+  return serviceDocs.map((doc) => {
+    const stat = statsMap.get(String(doc._id));
+    return {
+      ...doc,
+      averageRating: stat ? stat.averageRating : 0,
+      reviewCount: stat ? stat.reviewCount : 0,
+    };
+  });
+}
+
 app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
   const result = await users.find().toArray();
   res.send(result);
@@ -98,57 +147,156 @@ app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
 
 // Public Browse Services (Search, Filter & Sort)
 app.get("/browse-services", async (req, res) => {
-  const { search, category, serviceMode, sort } = req.query;
+  try {
+    const { search, category, serviceMode, sort } = req.query;
 
-  const query = {
-    approvalStatus: "approved",
-    isAvailable: true,
-  };
+    const query = {
+      approvalStatus: "approved",
+      isAvailable: true,
+    };
 
-  if (category && category !== "all") {
-    query.category = category;
+    if (category && category !== "all") {
+      query.category = category;
+    }
+
+    if (serviceMode && serviceMode !== "all") {
+      query.serviceMode = serviceMode;
+    }
+
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { category: { $regex: search, $options: "i" } },
+        { serviceArea: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    let sortOption = { createdAt: -1 };
+    if (sort === "price_asc") sortOption = { basePrice: 1 };
+    if (sort === "price_desc") sortOption = { basePrice: -1 };
+    if (sort === "newest") sortOption = { createdAt: -1 };
+
+    const result = await services.find(query).sort(sortOption).toArray();
+    const enriched = await attachRatingsToServices(result);
+    res.send(enriched);
+  } catch (err) {
+    res.status(500).send({ message: "Failed to fetch services." });
   }
-
-  if (serviceMode && serviceMode !== "all") {
-    query.serviceMode = serviceMode;
-  }
-
-  if (search) {
-    query.$or = [
-      { title: { $regex: search, $options: "i" } },
-      { category: { $regex: search, $options: "i" } },
-      { serviceArea: { $regex: search, $options: "i" } },
-    ];
-  }
-
-  let sortOption = { createdAt: -1 };
-  if (sort === "price_asc") sortOption = { basePrice: 1 };
-  if (sort === "price_desc") sortOption = { basePrice: -1 };
-  if (sort === "newest") sortOption = { createdAt: -1 };
-
-  const result = await services.find(query).sort(sortOption).toArray();
-  res.send(result);
 });
 
-// Public Service Details
 // Public Service Details
 app.get("/browse-services/:id", async (req, res) => {
   try {
     const { id } = req.params;
-
     if (!ObjectId.isValid(id)) {
       return res.status(404).send({ message: "Service not found." });
     }
 
-    const result = await services.findOne({ _id: new ObjectId(id) });
-
-    if (!result) {
+    const serviceDoc = await services.findOne({ _id: new ObjectId(id) });
+    if (!serviceDoc) {
       return res.status(404).send({ message: "Service not found." });
     }
 
-    res.send(result);
+    const [enrichedService] = await attachRatingsToServices([serviceDoc]);
+
+    const reviewsList = await bookings
+      .find(
+        {
+          serviceId: { $in: [String(serviceDoc._id), serviceDoc._id] },
+          paymentStatus: "paid",
+          rating: { $gte: 1, $lte: 5 },
+        },
+        {
+          projection: {
+            _id: 1,
+            customerName: 1,
+            rating: 1,
+            review: 1,
+            reviewedAt: 1,
+            paidAt: 1,
+          },
+        },
+      )
+      .sort({ reviewedAt: -1, paidAt: -1 })
+      .limit(20)
+      .toArray();
+
+    res.send({
+      ...enrichedService,
+      reviews: reviewsList,
+    });
   } catch (err) {
     res.status(500).send({ message: "Failed to load service details." });
+  }
+});
+
+//review patch
+app.patch("/bookings/:id/review", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { rating, review, customerEmail } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ message: "Invalid booking ID." });
+    }
+
+    const numericRating = Number(rating);
+    if (
+      !Number.isInteger(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return res
+        .status(400)
+        .send({ message: "Rating must be a whole number from 1 to 5." });
+    }
+
+    const cleanReview = typeof review === "string" ? review.trim() : "";
+    if (!cleanReview) {
+      return res.status(400).send({ message: "Please write a short review." });
+    }
+
+    const bookingDoc = await bookings.findOne({ _id: new ObjectId(id) });
+    if (!bookingDoc) {
+      return res.status(404).send({ message: "Booking not found." });
+    }
+
+    if (
+      customerEmail &&
+      bookingDoc.customerEmail?.toLowerCase() !==
+        String(customerEmail).toLowerCase()
+    ) {
+      return res
+        .status(403)
+        .send({ message: "Only the customer who booked can leave a review." });
+    }
+
+    if (bookingDoc.paymentStatus !== "paid") {
+      return res.status(400).send({
+        message: "You can submit a rating and review after payment is completed.",
+      });
+    }
+
+    const reviewedAt = new Date().toISOString();
+
+    await bookings.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $set: {
+          rating: numericRating,
+          review: cleanReview,
+          reviewedAt,
+        },
+      },
+    );
+
+    const updatedBooking = await bookings.findOne({ _id: new ObjectId(id) });
+    res.send({
+      message: "Thank you! Your rating and review have been saved.",
+      booking: updatedBooking,
+    });
+  } catch (err) {
+    res.status(500).send({ message: "Failed to save review." });
   }
 });
 
@@ -237,11 +385,9 @@ app.patch("/bookings/:id", verifyToken, async (req, res) => {
     // Technician: can only update their own job, one valid step forward at a time
     else if (role === "technician") {
       if (booking.technicianEmail !== req.user.email) {
-        return res
-          .status(403)
-          .send({
-            message: "Forbidden: Only the job owner can update status.",
-          });
+        return res.status(403).send({
+          message: "Forbidden: Only the job owner can update status.",
+        });
       }
 
       const validTransitions = {
@@ -349,11 +495,9 @@ app.post(
         return res.status(404).send({ message: "Booking not found." });
       }
       if (booking.status !== "completed") {
-        return res
-          .status(400)
-          .send({
-            message: "Payment is only allowed after repair completion.",
-          });
+        return res.status(400).send({
+          message: "Payment is only allowed after repair completion.",
+        });
       }
       if (booking.paymentStatus === "paid") {
         return res
