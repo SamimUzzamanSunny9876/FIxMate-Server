@@ -7,7 +7,7 @@ import Stripe from "stripe";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const client = new MongoClient(
-  `mongodb://${process.env.DB_USER}:${process.env.DB_USER_PASSWORD}@ac-qptuiex-shard-00-00.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-01.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-02.xuksm8z.mongodb.net:27017/?ssl=true&replicaSet=atlas-psa02l-shard-0&authSource=admin`
+  `mongodb://${process.env.DB_USER}:${process.env.DB_USER_PASSWORD}@ac-qptuiex-shard-00-00.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-01.xuksm8z.mongodb.net:27017,ac-qptuiex-shard-00-02.xuksm8z.mongodb.net:27017/?ssl=true&replicaSet=atlas-psa02l-shard-0&authSource=admin`,
 );
 const app = express();
 const port = process.env.PORT || 8000;
@@ -17,7 +17,7 @@ app.use(
     origin: ["http://localhost:3000", process.env.CLIENT_URL].filter(Boolean),
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
-  })
+  }),
 );
 app.use(express.json());
 
@@ -131,10 +131,25 @@ app.get("/browse-services", async (req, res) => {
 });
 
 // Public Service Details
+// Public Service Details
 app.get("/browse-services/:id", async (req, res) => {
-  const { id } = req.params;
-  const result = await services.findOne({ _id: new ObjectId(id) });
-  res.send(result);
+  try {
+    const { id } = req.params;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(404).send({ message: "Service not found." });
+    }
+
+    const result = await services.findOne({ _id: new ObjectId(id) });
+
+    if (!result) {
+      return res.status(404).send({ message: "Service not found." });
+    }
+
+    res.send(result);
+  } catch (err) {
+    res.status(500).send({ message: "Failed to load service details." });
+  }
 });
 
 // Booking post api (Customer)
@@ -196,21 +211,76 @@ app.get("/bookings", verifyToken, async (req, res) => {
 app.patch("/bookings/:id", verifyToken, async (req, res) => {
   try {
     const query = { _id: new ObjectId(req.params.id) };
-    const { status, finalAmount } = req.body;
+    const booking = await bookings.findOne(query);
 
-    const setFields = {};
-    if (status) setFields.status = status;
-    if (finalAmount !== undefined) setFields.finalAmount = Number(finalAmount);
-
-    const updateDoc = { $set: setFields };
-
-    if (status) {
-      updateDoc.$push = {
-        statusHistory: { status, changedAt: new Date() },
-      };
+    if (!booking) {
+      return res.status(404).send({ message: "Booking not found." });
     }
 
-    const result = await bookings.updateOne(query, updateDoc);
+    const { status: nextStatus, finalAmount } = req.body;
+    const currentStatus = booking.status;
+    const role = req.user.role || "customer";
+
+    // Customer: can only cancel their own booking while it is still 'requested'
+    if (role === "customer") {
+      if (booking.customerEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({ message: "Forbidden: Not your booking." });
+      }
+      if (currentStatus !== "requested" || nextStatus !== "cancelled") {
+        return res.status(400).send({
+          message: "You can only cancel a booking while it is requested.",
+        });
+      }
+    }
+    // Technician: can only update their own job, one valid step forward at a time
+    else if (role === "technician") {
+      if (booking.technicianEmail !== req.user.email) {
+        return res
+          .status(403)
+          .send({
+            message: "Forbidden: Only the job owner can update status.",
+          });
+      }
+
+      const validTransitions = {
+        requested: ["accepted", "rejected"],
+        accepted: ["in-progress"],
+        "in-progress": ["completed"],
+      };
+
+      const allowedNext = validTransitions[currentStatus] || [];
+      if (!allowedNext.includes(nextStatus)) {
+        return res.status(400).send({
+          message: `Invalid status change from '${currentStatus}' to '${nextStatus}'.`,
+        });
+      }
+
+      if (nextStatus === "completed") {
+        const parsedAmount = Number(finalAmount ?? booking.basePrice);
+        if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+          return res
+            .status(400)
+            .send({ message: "Final amount must be greater than 0." });
+        }
+      }
+    } else {
+      return res.status(403).send({ message: "Forbidden." });
+    }
+
+    const setFields = { status: nextStatus };
+    if (nextStatus === "completed") {
+      setFields.finalAmount = Number(finalAmount ?? booking.basePrice);
+    }
+
+    const result = await bookings.updateOne(query, {
+      $set: setFields,
+      $push: {
+        statusHistory: { status: nextStatus, changedAt: new Date() },
+      },
+    });
+
     res.send(result);
   } catch (err) {
     console.error("PATCH /bookings/:id error:", err);
@@ -281,7 +351,9 @@ app.post(
       if (booking.status !== "completed") {
         return res
           .status(400)
-          .send({ message: "Payment is only allowed after repair completion." });
+          .send({
+            message: "Payment is only allowed after repair completion.",
+          });
       }
       if (booking.paymentStatus === "paid") {
         return res
@@ -324,7 +396,12 @@ app.post(
         .status(500)
         .send({ message: err.message || "Failed to create Stripe session." });
     }
-  }
+    if (booking.customerEmail !== req.user.email) {
+      return res
+        .status(403)
+        .send({ message: "Forbidden: You can only pay for your own booking." });
+    }
+  },
 );
 
 // 3. Verify Stripe Checkout Session, save Payment, and mark Booking as paid
@@ -382,7 +459,7 @@ app.post(
       await payments.updateOne(
         { stripeSessionId: session.id },
         { $setOnInsert: paymentDoc },
-        { upsert: true }
+        { upsert: true },
       );
 
       const savedPayment = await payments.findOne({
@@ -397,7 +474,7 @@ app.post(
             $push: {
               statusHistory: { status: "paid", changedAt: new Date() },
             },
-          }
+          },
         );
       }
 
@@ -414,7 +491,7 @@ app.post(
         .status(500)
         .send({ message: err.message || "Failed to verify Stripe payment." });
     }
-  }
+  },
 );
 
 // Admin APIs
@@ -462,7 +539,7 @@ app.patch(
         .status(500)
         .send({ message: err.message || "Failed to update approval status." });
     }
-  }
+  },
 );
 
 app.patch(
@@ -481,7 +558,7 @@ app.patch(
     const updateDoc = { $set: { role } };
     const result = await users.updateOne({ email }, updateDoc);
     res.send(result);
-  }
+  },
 );
 
 app.delete(
@@ -492,7 +569,7 @@ app.delete(
     const email = req.params.email;
     const result = await users.deleteOne({ email });
     res.send(result);
-  }
+  },
 );
 
 app.get("/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
@@ -542,7 +619,7 @@ app.patch(
           $push: {
             statusHistory: { status, changedAt: new Date() },
           },
-        }
+        },
       );
 
       if (result.matchedCount === 0) {
@@ -556,7 +633,7 @@ app.patch(
         .status(500)
         .send({ message: err.message || "Failed to update booking status." });
     }
-  }
+  },
 );
 
 app.delete(
@@ -580,7 +657,7 @@ app.delete(
         .status(500)
         .send({ message: err.message || "Failed to delete booking." });
     }
-  }
+  },
 );
 
 app.listen(port, () => {
