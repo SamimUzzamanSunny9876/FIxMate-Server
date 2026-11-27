@@ -691,18 +691,30 @@ app.patch(
   verifyToken,
   verifyAdmin,
   async (req, res) => {
-    const email = req.params.email;
-    const { role } = req.body;
-    const allowedRoles = ["customer", "technician", "admin"];
+    try {
+      const email = decodeURIComponent(req.params.email).trim().toLowerCase();
+      const { role } = req.body;
+      const allowedRoles = ["customer", "technician", "admin"];
 
-    if (!allowedRoles.includes(role)) {
-      return res.status(400).send({ message: "Invalid role specified" });
+      if (!allowedRoles.includes(role)) {
+        return res.status(400).send({ message: "Invalid role specified" });
+      }
+
+      const result = await users.updateOne(
+        { email: { $regex: `^${email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" } },
+        { $set: { role } }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).send({ message: "User not found" });
+      }
+
+      res.send(result);
+    } catch (error) {
+      console.error("Error updating user role:", error);
+      res.status(500).send({ message: "Failed to update user role" });
     }
-
-    const updateDoc = { $set: { role } };
-    const result = await users.updateOne({ email }, updateDoc);
-    res.send(result);
-  },
+  }
 );
 
 app.delete(
